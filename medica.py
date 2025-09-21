@@ -1,7 +1,24 @@
+# This is medica_v1 for data preparation, dataset creation and training the model
+
+
+
 import awkward as ak
 import json
 import numpy as np
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader, random_split
+import awkward as ak
+import os
+import pandas as pd
+import matplotlib.pyplot as plt
+
+
+# -------------------------
+# Functions for reading data and inspecting branches
+# -------------------------
 
 def read_json_to_awkward(file_path):
     with open(file_path, "r") as f:
@@ -25,7 +42,38 @@ def branch_info(array):
         except Exception as e:
             print(f"branch {br} is not a list, but a scalar field")
 
+# The following class is for converting awkward array to torch Dataset
+class ColliderDataset(Dataset):
+    def __init__(self, ak_array):
+        """
+        ak_array has branches: track [10,30,7], tower [10,30,8], missinget [10,1,3], output_prob [4]
+        """
+        self.track = ak_array["track"]
+        self.tower = ak_array["tower"]
+        self.missinget = ak_array["missinget"]
+        self.output = ak_array["output_prob"]
 
+    def __len__(self):
+        return len(self.track)
+
+    def __getitem__(self, idx):
+        track = np.array(self.track[idx])       # [10,30,7]
+        tower = np.array(self.tower[idx])       # [10,30,8]
+        missinget = np.array(self.missinget[idx])  # [10,1,3]
+        output = np.array(self.output[idx])     # [4]
+
+        # Convert to torch
+        track = torch.tensor(track, dtype=torch.float32)
+        tower = torch.tensor(tower, dtype=torch.float32)
+        missinget = torch.tensor(missinget, dtype=torch.float32)
+        output = torch.tensor(output, dtype=torch.float32)
+
+        return track, tower, missinget, output
+
+
+# -------------------------
+# Functions for data refinement and dataset creation
+# -------------------------
 
 # Function for data refinement
 def refinement(array, track_min, tower_min):
@@ -356,6 +404,221 @@ def Sliding_Window_Dataset_Creator(refined_data, window, event_tower, event_trac
 
 
 
+# ----------------------------
+# Neural Network Model
+# ----------------------------
+
+
+class TransformerEncoder(nn.Module):
+    def __init__(self, embed_dim, num_heads=4, ff_dim=128, dropout=0.1):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
+        self.ff = nn.Sequential(
+            nn.Linear(embed_dim, ff_dim),
+            nn.ReLU(),
+            nn.Linear(ff_dim, embed_dim)
+        )
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        attn_out, _ = self.attn(x, x, x)
+        x = self.norm1(x + self.dropout(attn_out))
+        ff_out = self.ff(x)
+        x = self.norm2(x + self.dropout(ff_out))
+        return x
+    
+
+
+class MEDIC(nn.Module):
+    def __init__(self, d_track=7, d_tower=8, d_met=3, embed_dim=64):
+        super().__init__()
+
+        # Track encoder
+        self.track_proj = nn.Linear(d_track, embed_dim)
+        self.track_transformer = TransformerEncoder(embed_dim)
+
+        # Tower encoder
+        self.tower_proj = nn.Linear(d_tower, embed_dim)
+        self.tower_transformer = TransformerEncoder(embed_dim)
+
+        # missinget encoder
+        self.met_proj = nn.Sequential(
+            nn.Linear(d_met, embed_dim),
+            nn.ReLU(),
+            nn.Linear(embed_dim, embed_dim)
+        )
+
+        # CNN layers
+        self.cnn = nn.Sequential(
+            nn.Conv1d(3, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(64, 128, kernel_size=3, padding=1),
+            nn.ReLU(),
+        )
+
+        self.avgpool = nn.AdaptiveAvgPool1d(1)
+
+        self.fc = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 4)
+        )
+
+    def forward(self, track, tower, met):
+        B, T, P, _ = track.shape  # [B,10,30,d]
+
+        # Track
+        track = track.view(B*T, P, -1)
+        track = self.track_proj(track)
+        track = self.track_transformer(track)
+        track = track.mean(dim=1)
+        track = track.view(B, T, -1)
+
+        # Tower
+        tower = tower.view(B*T, P, -1)
+        tower = self.tower_proj(tower)
+        tower = self.tower_transformer(tower)
+        tower = tower.mean(dim=1)
+        tower = tower.view(B, T, -1)
+
+        # MET
+        met = met.view(B*T, -1)
+        met = self.met_proj(met)
+        met = met.view(B, T, -1)
+
+        # Stack
+        x = torch.stack([track, tower, met], dim=1)  # [B,3,T,embed]
+        x = x.mean(dim=-1)  # [B,3,T]
+
+        x = self.cnn(x)     # [B,128,T]
+        x = self.avgpool(x).squeeze(-1)  # [B,128]
+
+        logits = self.fc(x)
+        probs = F.softmax(logits, dim=-1)
+        log_probs = F.log_softmax(logits, dim=-1)
+
+        return probs, log_probs
 
 
         
+def train_model(model, train_loader, val_loader, optimizer, criterion, device, epochs=100, patience=10):
+    os.makedirs("Analytics", exist_ok=True)
+
+    log = {"epoch": [], "train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
+    best_val_loss = float("inf")
+    patience_counter = 0
+
+    for epoch in range(epochs):
+        # Training loop
+        model.train()
+        train_loss, correct, total = 0, 0, 0
+        for track, tower, met, y in train_loader:
+            track, tower, met, y = track.to(device), tower.to(device), met.to(device), y.to(device)
+            optimizer.zero_grad()
+            probs, log_probs = model(track, tower, met)
+            loss = criterion(log_probs, y)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+            pred_cls = probs.argmax(dim=1)
+            true_cls = y.argmax(dim=1)
+            correct += (pred_cls == true_cls).sum().item()
+            total += y.size(0)
+        train_loss /= len(train_loader)
+        train_acc = correct / total
+
+        # Validation loop
+        model.eval()
+        val_loss, correct, total = 0, 0, 0
+        with torch.no_grad():
+            for track, tower, met, y in val_loader:
+                track, tower, met, y = track.to(device), tower.to(device), met.to(device), y.to(device)
+                probs, log_probs = model(track, tower, met)
+                loss = criterion(log_probs, y)
+                val_loss += loss.item()
+                pred_cls = probs.argmax(dim=1)
+                true_cls = y.argmax(dim=1)
+                correct += (pred_cls == true_cls).sum().item()
+                total += y.size(0)
+        val_loss /= len(val_loader)
+        val_acc = correct / total
+
+        log["epoch"].append(epoch+1)
+        log["train_loss"].append(train_loss)
+        log["val_loss"].append(val_loss)
+        log["train_acc"].append(train_acc)
+        log["val_acc"].append(val_acc)
+
+        print(f"Epoch {epoch+1} | Train Loss {train_loss:.4f} Acc {train_acc:.4f} | "
+              f"Val Loss {val_loss:.4f} Acc {val_acc:.4f}")
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), "Analytics/best_model.pt")
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print("Early stopping triggered.")
+                break
+
+    # Save logs & plots
+    df = pd.DataFrame(log)
+    df.to_csv("Analytics/doctor_log.csv", index=False)
+
+    plt.figure(figsize=(10,5))
+    plt.subplot(1,2,1)
+    plt.plot(df["epoch"], df["train_loss"], label="Train Loss")
+    plt.plot(df["epoch"], df["val_loss"], label="Val Loss")
+    plt.xlabel("Epoch"); plt.ylabel("Loss"); plt.legend()
+    plt.subplot(1,2,2)
+    plt.plot(df["epoch"], df["train_acc"], label="Train Acc")
+    plt.plot(df["epoch"], df["val_acc"], label="Val Acc")
+    plt.xlabel("Epoch"); plt.ylabel("Accuracy"); plt.legend()
+    plt.tight_layout()
+    plt.savefig("Analytics/doctor_training.png")
+    plt.close()
+
+    return model
+
+
+def test_model(model, test_loader, criterion, device):
+    model.load_state_dict(torch.load("Analytics/best_model.pt"))
+    model.eval()
+    test_loss, correct, total = 0, 0, 0
+    with torch.no_grad():
+        for track, tower, met, y in test_loader:
+            track, tower, met, y = track.to(device), tower.to(device), met.to(device), y.to(device)
+            probs, log_probs = model(track, tower, met)
+            loss = criterion(log_probs, y)
+            test_loss += loss.item()
+            pred_cls = probs.argmax(dim=1)
+            true_cls = y.argmax(dim=1)
+            correct += (pred_cls == true_cls).sum().item()
+            total += y.size(0)
+    test_loss /= len(test_loader)
+    test_acc = correct / total
+    print(f"Test Loss: {test_loss:.4f} | Test Accuracy: {test_acc:.4f}")
+    return test_loss, test_acc
+
+def predict_model(model, data_loader, device):
+    """Return predictions (probabilities and predicted classes)."""
+    model.load_state_dict(torch.load("Analytics/best_model.pt"))
+    model.eval()
+    all_probs, all_preds = [], []
+    with torch.no_grad():
+        for track, tower, met, _ in data_loader:
+            track, tower, met = track.to(device), tower.to(device), met.to(device)
+            probs, _ = model(track, tower, met)
+            preds = probs.argmax(dim=1)
+            all_probs.append(probs.cpu())
+            all_preds.append(preds.cpu())
+    all_probs = torch.cat(all_probs, dim=0)
+    all_preds = torch.cat(all_preds, dim=0)
+    return all_probs, all_preds
