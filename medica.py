@@ -431,77 +431,101 @@ class TransformerEncoder(nn.Module):
     
 
 
+class AttentionPooling(nn.Module):
+    def __init__(self, embed_dim):
+        super().__init__()
+        self.query = nn.Linear(embed_dim, 1)
+
+    def forward(self, x):
+        # x: [B, P, embed]
+        weights = torch.softmax(self.query(x), dim=1)  # [B, P, 1]
+        pooled = (x * weights).sum(dim=1)              # [B, embed]
+        return pooled
+
+
 class MEDIC(nn.Module):
-    def __init__(self, d_track=7, d_tower=8, d_met=3, embed_dim=64):
+    def __init__(self, d_track=7, d_tower=8, d_met=3, embed_dim=128):
         super().__init__()
 
         # Track encoder
         self.track_proj = nn.Linear(d_track, embed_dim)
         self.track_transformer = TransformerEncoder(embed_dim)
+        self.track_pool = AttentionPooling(embed_dim)
 
         # Tower encoder
         self.tower_proj = nn.Linear(d_tower, embed_dim)
         self.tower_transformer = TransformerEncoder(embed_dim)
+        self.tower_pool = AttentionPooling(embed_dim)
 
-        # missinget encoder
+        # MET encoder
         self.met_proj = nn.Sequential(
             nn.Linear(d_met, embed_dim),
             nn.ReLU(),
             nn.Linear(embed_dim, embed_dim)
         )
 
-        # CNN layers
-        self.cnn = nn.Sequential(
-            nn.Conv1d(3, 32, kernel_size=3, padding=1),
+        # 2D CNN layers (treat [3,T,embed] as image-like input)
+        self.cnn2d = nn.Sequential(
+            nn.Conv2d(embed_dim, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.Conv1d(32, 64, kernel_size=3, padding=1),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
             nn.ReLU(),
-            nn.Conv1d(64, 128, kernel_size=3, padding=1),
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
             nn.ReLU(),
         )
 
-        self.avgpool = nn.AdaptiveAvgPool1d(1)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
 
+        # Fully connected classifier
         self.fc = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
             nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Linear(32, 4)
+            nn.Dropout(0.2),
+            nn.Linear(64, 4)
         )
 
     def forward(self, track, tower, met):
-        B, T, P, _ = track.shape  # [B,10,30,d]
+        B, T, P, _ = track.shape  # track: [B,10,30,d]
 
         # Track
-        track = track.view(B*T, P, -1)
-        track = self.track_proj(track)
+        track = track.view(B*T, P, -1)      # [B*T, 30, d_track]
+        track = self.track_proj(track)      # [B*T, 30, embed]
         track = self.track_transformer(track)
-        track = track.mean(dim=1)
-        track = track.view(B, T, -1)
+        track = self.track_pool(track)      # [B*T, embed]
+        track = track.view(B, T, -1)        # [B, T, embed]
 
         # Tower
         tower = tower.view(B*T, P, -1)
         tower = self.tower_proj(tower)
         tower = self.tower_transformer(tower)
-        tower = tower.mean(dim=1)
-        tower = tower.view(B, T, -1)
+        tower = self.tower_pool(tower)      # [B*T, embed]
+        tower = tower.view(B, T, -1)        # [B, T, embed]
 
         # MET
         met = met.view(B*T, -1)
-        met = self.met_proj(met)
-        met = met.view(B, T, -1)
+        met = self.met_proj(met)            # [B*T, embed]
+        met = met.view(B, T, -1)            # [B, T, embed]
 
-        # Stack
-        x = torch.stack([track, tower, met], dim=1)  # [B,3,T,embed]
-        x = x.mean(dim=-1)  # [B,3,T]
+        # Stack [B, 3, T, embed]
+        x = torch.stack([track, tower, met], dim=1)
 
-        x = self.cnn(x)     # [B,128,T]
-        x = self.avgpool(x).squeeze(-1)  # [B,128]
+        # Reshape for CNN2d: [B, embed, 3, T]
+        x = x.permute(0, 3, 1, 2)
 
-        logits = self.fc(x)
-        probs = F.softmax(logits, dim=-1)
-        log_probs = F.log_softmax(logits, dim=-1)
+        # Apply CNN2d
+        x = self.cnn2d(x)                   # [B, 256, 3, T]
+        x = self.avgpool(x).view(B, -1)     # [B, 256]
+
+        # Fully connected classifier
+        logits = self.fc(x)                 # [B, 4]
+        probs = F.softmax(logits, dim=-1)   # probabilities
+        log_probs = F.log_softmax(logits, dim=-1)  # log-probabilities
 
         return probs, log_probs
 
