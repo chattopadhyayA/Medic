@@ -1,4 +1,4 @@
-# This is medica_v2 for data preparation, dataset creation and training the model
+# This is medica_v3 for data preparation, dataset creation and training the model
 
 
 import uproot
@@ -9,11 +9,20 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader, Subset, random_split
 import awkward as ak
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import KFold
+from sklearn.metrics import (
+    confusion_matrix,
+    roc_auc_score,
+    roc_curve,
+    accuracy_score
+)
+from sklearn.preprocessing import label_binarize
 
 
 
@@ -642,19 +651,24 @@ class MEDIC(nn.Module):
 
         return probs, log_probs
 
+# Brier score metric for model evaluation
+
+def brier_score(probs, y_true):  # helper for Brier score
+    return ((probs - y_true.float()) ** 2).sum(dim=1).mean().item()
 
         
-def train_model(model, train_loader, val_loader, optimizer, criterion, device, epochs=100, patience=10):
+def train_model(model, train_loader, val_loader, optimizer, criterion, device, epochs=100, patience=10, fold_id=None):
     os.makedirs("Analytics", exist_ok=True)
+    os.makedirs("Analytics/models", exist_ok=True) 
 
-    log = {"epoch": [], "train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
+    log = {"epoch": [], "train_loss": [], "val_loss": [], "train_acc": [], "val_acc": [], "train_brier": [], "val_brier": []}
     best_val_loss = float("inf")
     patience_counter = 0
 
     for epoch in range(epochs):
         # Training loop
         model.train()
-        train_loss, correct, total = 0, 0, 0
+        train_loss, correct, total, train_brier = 0, 0, 0, 0
         for track, tower, met, y in train_loader:
             track, tower, met, y = track.to(device), tower.to(device), met.to(device), y.to(device)
             optimizer.zero_grad()
@@ -667,12 +681,15 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, device, e
             true_cls = y.argmax(dim=1)
             correct += (pred_cls == true_cls).sum().item()
             total += y.size(0)
+            train_brier += brier_score(probs, y) * y.size(0)
+
         train_loss /= len(train_loader)
         train_acc = correct / total
+        train_brier /= total
 
         # Validation loop
         model.eval()
-        val_loss, correct, total = 0, 0, 0
+        val_loss, correct, total, val_brier = 0, 0, 0, 0
         with torch.no_grad():
             for track, tower, met, y in val_loader:
                 track, tower, met, y = track.to(device), tower.to(device), met.to(device), y.to(device)
@@ -683,79 +700,306 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, device, e
                 true_cls = y.argmax(dim=1)
                 correct += (pred_cls == true_cls).sum().item()
                 total += y.size(0)
+                val_brier += brier_score(probs, y) * y.size(0)
+
         val_loss /= len(val_loader)
         val_acc = correct / total
+        val_brier /= total 
 
         log["epoch"].append(epoch+1)
         log["train_loss"].append(train_loss)
         log["val_loss"].append(val_loss)
         log["train_acc"].append(train_acc)
         log["val_acc"].append(val_acc)
+        log["train_brier"].append(train_brier) 
+        log["val_brier"].append(val_brier)  
 
-        print(f"Epoch {epoch+1} | Train Loss {train_loss:.4f} Acc {train_acc:.4f} | "
-              f"Val Loss {val_loss:.4f} Acc {val_acc:.4f}")
+        print(f"Fold {fold_id} | Epoch {epoch+1} | Train Loss {train_loss:.4f} Acc {train_acc:.4f} Brier {train_brier:.4f} | "
+              f"Val Loss {val_loss:.4f} Acc {val_acc:.4f} Brier {val_brier:.4f}")
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
-            torch.save(model.state_dict(), "Analytics/best_model.pt")
+            torch.save(model.state_dict(), f"Analytics/models/best_model_fold_{fold_id}.pt")
         else:
             patience_counter += 1
             if patience_counter >= patience:
-                print("Early stopping triggered.")
+                print(f"Early stopping triggered for Fold {fold_id} at epoch {epoch+1}.")
                 break
 
     # Save logs & plots
     df = pd.DataFrame(log)
-    df.to_csv("Analytics/doctor_log.csv", index=False)
+    df.to_csv(f"Analytics/model_logs_{fold_id}.csv", index=False)  
 
-    plt.figure(figsize=(10,5))
-    plt.subplot(1,2,1)
-    plt.plot(df["epoch"], df["train_loss"], label="Train Loss")
-    plt.plot(df["epoch"], df["val_loss"], label="Val Loss")
-    plt.xlabel("Epoch"); plt.ylabel("Loss"); plt.legend()
-    plt.subplot(1,2,2)
+    # Save per-fold plots
+    plt.figure(figsize=(10, 4))
+    plt.subplot(1, 2, 1)
     plt.plot(df["epoch"], df["train_acc"], label="Train Acc")
     plt.plot(df["epoch"], df["val_acc"], label="Val Acc")
+    plt.axvline(x=epoch + 1 - patience_counter, color='red', linestyle='--', label="Early Stop")  
     plt.xlabel("Epoch"); plt.ylabel("Accuracy"); plt.legend()
+    plt.title(f"Fold {fold_id} Accuracy")
+
+    plt.subplot(1, 2, 2)
+    plt.plot(df["epoch"], df["train_brier"], label="Train Brier")
+    plt.plot(df["epoch"], df["val_brier"], label="Val Brier")
+    plt.axvline(x=epoch + 1 - patience_counter, color='red', linestyle='--', label="Early Stop") 
+    plt.xlabel("Epoch"); plt.ylabel("Brier Score"); plt.legend()
+    plt.title(f"Fold {fold_id} Brier")
+
     plt.tight_layout()
-    plt.savefig("Analytics/doctor_training.png")
+    plt.savefig(f"Analytics/training_fold_{fold_id}.png")  
     plt.close()
 
-    return model
+
+    return df
 
 
-def test_model(model, test_loader, criterion, device):
-    model.load_state_dict(torch.load("Analytics/best_model.pt"))
-    model.eval()
-    test_loss, correct, total = 0, 0, 0
+def cross_validate_model(dataset, k, batch_size, model_class, model_kwargs, optimizer_class, optimizer_kwargs, criterion, device, epochs, patience):  
+    kf = KFold(n_splits=k, shuffle=True, random_state=42)
+    all_logs = []
+
+    for fold_id, (train_idx, val_idx) in enumerate(kf.split(range(len(dataset))), start=1):
+        print(f"\n--- Starting Fold {fold_id}/{k} Training ---")
+        train_subset = Subset(dataset, train_idx)
+        val_subset = Subset(dataset, val_idx)
+
+        train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_subset, batch_size=batch_size)
+
+        model = model_class(**model_kwargs).to(device)
+        optimizer = optimizer_class(model.parameters(), **optimizer_kwargs)
+
+        df = train_model(model, train_loader, val_loader, optimizer, criterion, device, epochs, patience, fold_id=fold_id)
+        all_logs.append(df)
+
+        print(f"\n--- Completed Fold {fold_id}/{k} Training ---")
+
+
+    # FINAL COMPARISON PLOTS
+
+    plt.figure(figsize=(12, 5))
+    for i, df in enumerate(all_logs, start=1):
+        plt.plot(df["epoch"], df["val_acc"], label=f"Fold {i}")
+    plt.xlabel("Epoch"); plt.ylabel("Validation Accuracy")
+    plt.title("Validation Accuracy per Fold")
+    plt.legend()
+    plt.savefig("Analytics/validation_accuracy_all_folds.png")  # <<< CHANGED >>>
+    plt.close()
+
+    plt.figure(figsize=(12, 5))
+    for i, df in enumerate(all_logs, start=1):
+        plt.plot(df["epoch"], df["val_brier"], label=f"Fold {i}")
+    plt.xlabel("Epoch"); plt.ylabel("Validation Brier Score")
+    plt.title("Validation Brier Score per Fold")
+    plt.legend()
+    plt.savefig("Analytics/validation_brier_all_folds.png")  # <<< CHANGED >>>
+    plt.close()
+
+
+
+
+
+def test_model(model_class, model_kwargs, test_loader, device, k=5):
+    # Load all trained models
+    models = []
+    for i in range(1, k + 1):
+        model_path = f"Analytics/models/best_model_fold_{i}.pt"
+        model = model_class(**model_kwargs).to(device)
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.eval()
+        models.append(model)
+        print(f"Loaded model {i} from: {model_path}")
+
+    all_probs_mean = []
+    all_preds_majority = []
+    all_targets = []
+
     with torch.no_grad():
         for track, tower, met, y in test_loader:
             track, tower, met, y = track.to(device), tower.to(device), met.to(device), y.to(device)
-            probs, log_probs = model(track, tower, met)
-            loss = criterion(log_probs, y)
-            test_loss += loss.item()
-            pred_cls = probs.argmax(dim=1)
-            true_cls = y.argmax(dim=1)
-            correct += (pred_cls == true_cls).sum().item()
-            total += y.size(0)
-    test_loss /= len(test_loader)
-    test_acc = correct / total
-    print(f"Test Loss: {test_loss:.4f} | Test Accuracy: {test_acc:.4f}")
-    return test_loss, test_acc
 
-def predict_model(model, data_loader, device):
-    """Return predictions (probabilities and predicted classes)."""
-    model.load_state_dict(torch.load("Analytics/best_model.pt"))
-    model.eval()
-    all_probs, all_preds = [], []
+            # Collect outputs from all k models
+            fold_probs = []
+            fold_preds = []
+            for model in models:
+                probs, _ = model(track, tower, met)
+                fold_probs.append(probs)
+                fold_preds.append(probs.argmax(dim=1))
+
+            # Stack predictions
+            fold_probs = torch.stack(fold_probs)  # [k, batch, num_classes]
+            fold_preds = torch.stack(fold_preds)  # [k, batch]
+
+            # Majority Voting for Accuracy
+            preds_majority = torch.mode(fold_preds, dim=0).values  # [batch]
+
+            # Probability Averaging for Brier
+            probs_mean = fold_probs.mean(dim=0)  # [batch, num_classes]
+
+            all_probs_mean.append(probs_mean.cpu())
+            all_preds_majority.append(preds_majority.cpu())
+            all_targets.append(y.cpu())
+
+    # Concatenate all batches
+    all_probs_mean = torch.cat(all_probs_mean, dim=0)
+    all_preds_majority = torch.cat(all_preds_majority, dim=0)
+    all_targets = torch.cat(all_targets, dim=0)
+
+    # Convert to numpy
+    all_probs = all_probs_mean.numpy()
+    all_preds = all_preds_majority.numpy()
+    all_targets_np = all_targets.numpy()
+    y_true = np.argmax(all_targets_np, axis=1)
+    y_true_onehot = label_binarize(y_true, classes=list(range(all_probs.shape[1])))
+
+    # Compute metrics
+    acc = accuracy_score(y_true, all_preds)
+    brier = brier_score(torch.tensor(all_probs), all_targets)
+
+    print(f"\nEnsemble Accuracy (Majority Vote): {acc:.4f}")
+    print(f"Ensemble Brier Score (Averaged Probabilities): {brier:.4f}")
+
+    # ============================================
+    # CASE 1: NORMAL vs ANOMALOUS 
+    # ============================================
+    print("\n=== Case 1: Normal vs Anomalous ===")
+
+    y_binary_true = np.where(y_true == 0, 0, 1)
+    y_binary_prob = 1 - all_probs[:, 0]  # probability of being anomalous
+    y_binary_pred = np.where(all_preds == 0, 0, 1)  # majority vote binary prediction
+
+    acc_bin = accuracy_score(y_binary_true, y_binary_pred)
+    auc_bin = roc_auc_score(y_binary_true, y_binary_prob)
+
+    print(f"Binary Accuracy: {acc_bin:.4f}, ROC-AUC: {auc_bin:.4f}")
+
+    cm_bin = confusion_matrix(y_binary_true, y_binary_pred)
+    plt.figure(figsize=(5, 4))
+    sns.heatmap(cm_bin, annot=True, fmt='d', cmap='Blues',
+                xticklabels=["Normal", "Anomalous"],
+                yticklabels=["Normal", "Anomalous"])
+    plt.title(f"Confusion Matrix (Binary)\nAcc={acc_bin:.3f}, AUC={auc_bin:.3f}")
+    plt.xlabel("Predicted"); plt.ylabel("True")
+    plt.tight_layout()
+    plt.savefig("Analytics/confusion_matrix_binary.png")
+    plt.close()
+
+    fpr, tpr, _ = roc_curve(y_binary_true, y_binary_prob)
+    plt.figure()
+    plt.plot(fpr, tpr, label=f"AUC={auc_bin:.3f}")
+    plt.plot([0, 1], [0, 1], 'k--')
+    plt.xlabel("False Positive Rate"); plt.ylabel("True Positive Rate")
+    plt.title("ROC Curve - Normal vs Anomalous")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("Analytics/roc_curve_binary.png")
+    plt.close()
+
+
+
+    # ============================================
+    # CASE 2: 4-CLASS CLASSIFICATION
+    # ============================================
+    print("\n=== Case 2: 4-Class Classification ===")
+
+    acc_multi = accuracy_score(y_true, all_preds)
+    auc_multi = roc_auc_score(y_true, all_probs, multi_class="ovr") 
+
+    print(f"4-Class Accuracy: {acc_multi:.4f}, ROC-AUC: {auc_multi:.4f}")
+
+    cm_multi = confusion_matrix(y_true, all_preds)
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(cm_multi, annot=True, fmt='d', cmap='Blues',
+                xticklabels=["Normal", "Barrel", "Endcap", "Forward"],
+                yticklabels=["Normal", "Barrel", "Endcap", "Forward"])
+    plt.title(f"Confusion Matrix (4-Class)\nAcc={acc_multi:.3f}, AUC={auc_multi:.3f}")
+    plt.xlabel("Predicted"); plt.ylabel("True")
+    plt.tight_layout()
+    plt.savefig("Analytics/confusion_matrix_multiclass.png")
+    plt.close()
+
+    # ROC for each class
+    plt.figure(figsize=(7, 5))
+    for i, label in enumerate(["Normal", "Barrel", "Endcap", "Forward"]):
+        fpr, tpr, _ = roc_curve(y_true_onehot[:, i], all_probs[:, i])
+        plt.plot(fpr, tpr, label=f"Class {label}")
+    plt.plot([0, 1], [0, 1], 'k--')
+    plt.xlabel("False Positive Rate"); plt.ylabel("True Positive Rate")
+    plt.title(f"ROC Curves - 4-Class (AUC={auc_multi:.3f})")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("Analytics/roc_curve_multiclass.png")
+    plt.close()
+
+    # Save metrics summary
+    metrics_summary = {
+        "Ensemble_Accuracy_MajorityVote": acc,
+        "Brier_Score_AvgProb": brier,
+        "Binary_Accuracy": acc_bin,
+        "Binary_ROC_AUC": auc_bin,
+        "Multi_Accuracy": acc_multi,
+        "Multi_ROC_AUC": auc_multi
+    }
+    pd.DataFrame([metrics_summary]).to_csv("Analytics/ensemble_metrics.csv", index=False)
+
+    print("\nAll evaluation plots and metrics saved under Analytics.\n")
+    return metrics_summary
+
+
+
+
+def predict_from_model(model_class, model_kwargs, test_loader, device, k=5):
+    # Load all trained models and outputs the predictions only
+    models = []
+    for i in range(1, k + 1):
+        model_path = f"Analytics/models/best_model_fold_{i}.pt"
+        model = model_class(**model_kwargs).to(device)
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.eval()
+        models.append(model)
+        print(f"Loaded model {i} from: {model_path}")
+
+    all_probs_mean = []
+    all_preds_majority = []
+    all_targets = []
+
     with torch.no_grad():
-        for track, tower, met, _ in data_loader:
-            track, tower, met = track.to(device), tower.to(device), met.to(device)
-            probs, _ = model(track, tower, met)
-            preds = probs.argmax(dim=1)
-            all_probs.append(probs.cpu())
-            all_preds.append(preds.cpu())
-    all_probs = torch.cat(all_probs, dim=0)
-    all_preds = torch.cat(all_preds, dim=0)
-    return all_probs, all_preds
+        for track, tower, met, y in test_loader:
+            track, tower, met, y = track.to(device), tower.to(device), met.to(device), y.to(device)
+
+            # Collect outputs from all k models
+            fold_probs = []
+            fold_preds = []
+            for model in models:
+                probs, _ = model(track, tower, met)
+                fold_probs.append(probs)
+                fold_preds.append(probs.argmax(dim=1))
+
+            # Stack predictions
+            fold_probs = torch.stack(fold_probs)  # [k, batch, num_classes]
+            fold_preds = torch.stack(fold_preds)  # [k, batch]
+
+            # Majority Voting for Accuracy
+            preds_majority = torch.mode(fold_preds, dim=0).values  # [batch]
+
+            # Probability Averaging for Brier
+            probs_mean = fold_probs.mean(dim=0)  # [batch, num_classes]
+
+            all_probs_mean.append(probs_mean.cpu())
+            all_preds_majority.append(preds_majority.cpu())
+            all_targets.append(y.cpu())
+
+    # Concatenate all batches
+    all_probs_mean = torch.cat(all_probs_mean, dim=0)
+    all_preds_majority = torch.cat(all_preds_majority, dim=0)
+    all_targets = torch.cat(all_targets, dim=0)
+
+    # Convert to numpy
+    all_probs = all_probs_mean.numpy()
+    all_preds = all_preds_majority.numpy()
+    all_targets_np = all_targets.numpy()
+    y_true = np.argmax(all_targets_np, axis=1)
+    y_true_onehot = label_binarize(y_true, classes=list(range(all_probs.shape[1])))
+
+    return all_probs, all_preds, y_true, y_true_onehot
