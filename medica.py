@@ -781,20 +781,38 @@ def cross_validate_model(dataset, k, batch_size, model_class, model_kwargs, opti
 
     plt.figure(figsize=(12, 5))
     for i, df in enumerate(all_logs, start=1):
-        plt.plot(df["epoch"], df["val_acc"], label=f"Fold {i}")
+        plt.plot(df["epoch"], df["val_acc"], label=f"Model {i}")
     plt.xlabel("Epoch"); plt.ylabel("Validation Accuracy")
-    plt.title("Validation Accuracy per Fold")
+    plt.title("Validation Accuracy for each model")
     plt.legend()
-    plt.savefig("Analytics/validation_accuracy_all_folds.png")  # <<< CHANGED >>>
+    plt.savefig("Analytics/validation_accuracy_all_folds.png")  
     plt.close()
 
     plt.figure(figsize=(12, 5))
     for i, df in enumerate(all_logs, start=1):
-        plt.plot(df["epoch"], df["val_brier"], label=f"Fold {i}")
+        plt.plot(df["epoch"], df["val_brier"], label=f"Model {i}")
     plt.xlabel("Epoch"); plt.ylabel("Validation Brier Score")
-    plt.title("Validation Brier Score per Fold")
+    plt.title("Validation Brier Score for each model")
     plt.legend()
-    plt.savefig("Analytics/validation_brier_all_folds.png")  # <<< CHANGED >>>
+    plt.savefig("Analytics/validation_brier_all_folds.png")  
+    plt.close()
+
+    plt.figure(figsize=(12, 5))
+    for i, df in enumerate(all_logs, start=1):
+        plt.plot(df["epoch"], df["train_acc"], label=f"Model {i}")
+    plt.xlabel("Epoch"); plt.ylabel("Training Accuracy")
+    plt.title("Training Accuracy for each model")
+    plt.legend()
+    plt.savefig("Analytics/training_accuracy_all_folds.png")  
+    plt.close()
+
+    plt.figure(figsize=(12, 5))
+    for i, df in enumerate(all_logs, start=1):
+        plt.plot(df["epoch"], df["train_brier"], label=f"Model {i}")
+    plt.xlabel("Epoch"); plt.ylabel("Training Brier Score")
+    plt.title("Training Brier Score for each model")
+    plt.legend()
+    plt.savefig("Analytics/training_brier_all_folds.png")  
     plt.close()
 
 
