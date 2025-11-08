@@ -444,6 +444,7 @@ def Sliding_Window_Dataset_Creator(refined_data, window, event_tower, event_trac
 
     for w_start in range(n_windows):
         set_tracks, set_towers, set_missinget, set_blindfold = [], [], [], []
+        print(f"Processing window {w_start + 1} / {n_windows}", end="\r")
 
         # select window events
         for ev_i in range(w_start, w_start + window_size):
