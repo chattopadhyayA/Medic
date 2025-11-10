@@ -15,7 +15,7 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.model_selection import KFold
+from sklearn.model_selection import StratifiedKFold 
 from sklearn.metrics import (
     confusion_matrix,
     roc_auc_score,
@@ -657,10 +657,28 @@ class MEDIC(nn.Module):
 def brier_score(probs, y_true):  # helper for Brier score
     return ((probs - y_true.float()) ** 2).sum(dim=1).mean().item()
 
+# KL Divergence loss per sample
+class KLDPerSample(nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, log_probs, target_probs):
+        # sum over classes (dim=1) but keep batch dimension
+        return F.kl_div(log_probs, target_probs, reduction="none").sum(dim=1)
+
         
 def train_model(model, train_loader, val_loader, optimizer, criterion, device, epochs=100, patience=10, fold_id=None):
     os.makedirs("Analytics", exist_ok=True)
     os.makedirs("Analytics/models", exist_ok=True) 
+
+    labels = []
+    for _, _, _, y in train_loader.dataset:
+        labels.append(int(y.argmax(dim=0)))
+    labels_tensor = torch.tensor(labels)
+    unique, counts = torch.unique(labels_tensor, return_counts=True)
+    class_weights = 1.0 / counts.float()
+    class_weights = class_weights / class_weights.sum() * len(unique)
+    class_weights = class_weights.to(device)
+    print(f"Class weights applied: {[round(w, 2) for w in class_weights.tolist()]}") 
 
     log = {"epoch": [], "train_loss": [], "val_loss": [], "train_acc": [], "val_acc": [], "train_brier": [], "val_brier": []}
     best_val_loss = float("inf")
@@ -675,11 +693,15 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, device, e
             optimizer.zero_grad()
             probs, log_probs = model(track, tower, met)
             loss = criterion(log_probs, y)
+
+            true_cls = y.argmax(dim=1)
+            sample_weights = class_weights[true_cls]  # [batch]
+            loss_per_sample = criterion(log_probs, y)  # sum over classes
+            loss = (loss_per_sample * sample_weights).mean()
             loss.backward()
             optimizer.step()
             train_loss += loss.item()
             pred_cls = probs.argmax(dim=1)
-            true_cls = y.argmax(dim=1)
             correct += (pred_cls == true_cls).sum().item()
             total += y.size(0)
             train_brier += brier_score(probs, y) * y.size(0)
@@ -695,10 +717,15 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, device, e
             for track, tower, met, y in val_loader:
                 track, tower, met, y = track.to(device), tower.to(device), met.to(device), y.to(device)
                 probs, log_probs = model(track, tower, met)
-                loss = criterion(log_probs, y)
+
+
+                true_cls = y.argmax(dim=1)
+                sample_weights = class_weights[true_cls]
+                loss_per_sample = criterion(log_probs, y)
+                loss = (loss_per_sample * sample_weights).mean()
                 val_loss += loss.item()
                 pred_cls = probs.argmax(dim=1)
-                true_cls = y.argmax(dim=1)
+
                 correct += (pred_cls == true_cls).sum().item()
                 total += y.size(0)
                 val_brier += brier_score(probs, y) * y.size(0)
@@ -757,10 +784,23 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, device, e
 
 
 def cross_validate_model(dataset, k, batch_size, model_class, model_kwargs, optimizer_class, optimizer_kwargs, criterion, device, epochs, patience):  
-    kf = KFold(n_splits=k, shuffle=True, random_state=42)
+    print("\nRunning a quick analysis of the training data...")
+
+    labels = []
+    for i in range(len(dataset)):
+        _, _, _, y = dataset[i]  # dataset returns (track, tower, met, y)
+        labels.append(int(y.argmax(dim=0)))  # convert probabilities to class index
+
+    labels_tensor = torch.tensor(labels)
+    unique, counts = torch.unique(labels_tensor, return_counts=True)
+    print("Label distribution in dataset:")
+    for u, c in zip(unique.tolist(), counts.tolist()):
+        print(f"  Class {u}: {c} samples")
+
+    skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=42)
     all_logs = []
 
-    for fold_id, (train_idx, val_idx) in enumerate(kf.split(range(len(dataset))), start=1):
+    for fold_id, (train_idx, val_idx) in enumerate(skf.split(range(len(dataset)), labels_tensor), start=1):
         print(f"\n--- Starting Fold {fold_id}/{k} Training ---")
         train_subset = Subset(dataset, train_idx)
         val_subset = Subset(dataset, val_idx)
@@ -819,7 +859,47 @@ def cross_validate_model(dataset, k, batch_size, model_class, model_kwargs, opti
 
 
 
-def test_model(model_class, model_kwargs, test_loader, device, k=5):
+def test_model(model_class, model_kwargs, test_loader, device, k=5, test_samples = 10000):
+    print("\nRunning a quick analysis of the test data...")
+
+    all_y = []
+    for _, _, _, y in test_loader:
+        all_y.append(y)
+    all_y = torch.cat(all_y, dim=0)
+    labels_tensor = all_y.argmax(dim=1)
+    unique, counts = torch.unique(labels_tensor, return_counts=True)
+    for u, c in zip(unique.tolist(), counts.tolist()):
+        print(f"  Class {u}: {c} samples")
+
+    min_class_samples = counts.min().item()
+    if min_class_samples < test_samples:
+        print(f"\n Not enough samples for test_samples={test_samples}. "
+              f"Minimum available per class is {min_class_samples}. "
+              f"Consider reducing 'test_samples' accordingly.\n")
+        test_samples = min_class_samples  # adjust automatically
+
+    selected_indices = []
+    for cls in unique.tolist():
+        cls_indices = (labels_tensor == cls).nonzero(as_tuple=True)[0]
+        perm = torch.randperm(len(cls_indices))[:test_samples]
+        selected_indices.extend(cls_indices[perm].tolist())
+
+    selected_indices = torch.tensor(selected_indices)
+    balanced_y = all_y[selected_indices]
+    print(f"\nBalanced test sample created with {len(selected_indices)} total samples "
+          f"({test_samples} per class)\n")
+
+    # Reconstruct balanced DataLoader
+    balanced_dataset = torch.utils.data.TensorDataset(
+        torch.cat([batch[0] for i, batch in enumerate(test_loader.dataset) if i in selected_indices]),
+        torch.cat([batch[1] for i, batch in enumerate(test_loader.dataset) if i in selected_indices]),
+        torch.cat([batch[2] for i, batch in enumerate(test_loader.dataset) if i in selected_indices]),
+        balanced_y
+    )
+    test_loader = DataLoader(balanced_dataset, batch_size=test_loader.batch_size, shuffle=False)
+
+
+
     # Load all trained models
     models = []
     for i in range(1, k + 1):
@@ -888,8 +968,20 @@ def test_model(model_class, model_kwargs, test_loader, device, k=5):
     y_binary_prob = 1 - all_probs[:, 0]  # probability of being anomalous
     y_binary_pred = np.where(all_preds == 0, 0, 1)  # majority vote binary prediction
 
-    acc_bin = accuracy_score(y_binary_true, y_binary_pred)
-    auc_bin = roc_auc_score(y_binary_true, y_binary_prob)
+    normal_indices = np.where(y_binary_true == 0)[0]
+    anomalous_indices = np.where(y_binary_true == 1)[0]
+
+    selected_indices = np.concatenate([
+        np.random.choice(normal_indices, test_samples, replace=False),
+        np.random.choice(anomalous_indices, test_samples, replace=False)
+        ])
+    
+    y_binary_true_bal = y_binary_true[selected_indices]
+    y_binary_prob_bal = y_binary_prob[selected_indices]
+    y_binary_pred_bal = y_binary_pred[selected_indices]
+
+    acc_bin = accuracy_score(y_binary_true_bal, y_binary_pred_bal)
+    auc_bin = roc_auc_score(y_binary_true_bal, y_binary_prob_bal)
 
     print(f"Binary Accuracy: {acc_bin:.4f}, ROC-AUC: {auc_bin:.4f}")
 
