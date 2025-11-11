@@ -1,4 +1,4 @@
-# This is medica_v3 for data preparation, dataset creation and training the model
+# This is medica_v4 for data preparation, dataset creation and training the model
 
 
 import uproot
@@ -885,16 +885,25 @@ def test_model(model_class, model_kwargs, test_loader, device, k=5, test_samples
         selected_indices.extend(cls_indices[perm].tolist())
 
     selected_indices = torch.tensor(selected_indices)
-    balanced_y = all_y[selected_indices]
-    print(f"\nBalanced test sample created with {len(selected_indices)} total samples "
-          f"({test_samples} per class)\n")
+    tracks, towers, mets, ys = [], [], [], []
+    for i in range(len(test_loader.dataset)):
+        track, tower, met, y = test_loader.dataset[i]
+        tracks.append(track.unsqueeze(0))
+        towers.append(tower.unsqueeze(0))
+        mets.append(met.unsqueeze(0))
+        ys.append(y.unsqueeze(0))
 
-    # Reconstruct balanced DataLoader
+    tracks = torch.cat(tracks, dim=0)
+    towers = torch.cat(towers, dim=0)
+    mets = torch.cat(mets, dim=0)
+    ys = torch.cat(ys, dim=0)
+
+    # Select the balanced subset
     balanced_dataset = torch.utils.data.TensorDataset(
-        torch.cat([batch[0] for i, batch in enumerate(test_loader.dataset) if i in selected_indices]),
-        torch.cat([batch[1] for i, batch in enumerate(test_loader.dataset) if i in selected_indices]),
-        torch.cat([batch[2] for i, batch in enumerate(test_loader.dataset) if i in selected_indices]),
-        balanced_y
+        tracks[selected_indices],
+        towers[selected_indices],
+        mets[selected_indices],
+        ys[selected_indices]
     )
     test_loader = DataLoader(balanced_dataset, batch_size=test_loader.batch_size, shuffle=False)
 
@@ -959,60 +968,10 @@ def test_model(model_class, model_kwargs, test_loader, device, k=5, test_samples
     print(f"\nEnsemble Accuracy (Majority Vote): {acc:.4f}")
     print(f"Ensemble Brier Score (Averaged Probabilities): {brier:.4f}")
 
-    # ============================================
-    # CASE 1: NORMAL vs ANOMALOUS 
-    # ============================================
-    print("\n=== Case 1: Normal vs Anomalous ===")
-
-    y_binary_true = np.where(y_true == 0, 0, 1)
-    y_binary_prob = 1 - all_probs[:, 0]  # probability of being anomalous
-    y_binary_pred = np.where(all_preds == 0, 0, 1)  # majority vote binary prediction
-
-    normal_indices = np.where(y_binary_true == 0)[0]
-    anomalous_indices = np.where(y_binary_true == 1)[0]
-
-    selected_indices = np.concatenate([
-        np.random.choice(normal_indices, test_samples, replace=False),
-        np.random.choice(anomalous_indices, test_samples, replace=False)
-        ])
-    
-    y_binary_true_bal = y_binary_true[selected_indices]
-    y_binary_prob_bal = y_binary_prob[selected_indices]
-    y_binary_pred_bal = y_binary_pred[selected_indices]
-
-    acc_bin = accuracy_score(y_binary_true_bal, y_binary_pred_bal)
-    auc_bin = roc_auc_score(y_binary_true_bal, y_binary_prob_bal)
-
-    print(f"Binary Accuracy: {acc_bin:.4f}, ROC-AUC: {auc_bin:.4f}")
-
-    cm_bin = confusion_matrix(y_binary_true, y_binary_pred)
-    plt.figure(figsize=(5, 4))
-    sns.heatmap(cm_bin, annot=True, fmt='d', cmap='Blues',
-                xticklabels=["Normal", "Anomalous"],
-                yticklabels=["Normal", "Anomalous"])
-    plt.title(f"Confusion Matrix (Binary)\nAcc={acc_bin:.3f}, AUC={auc_bin:.3f}")
-    plt.xlabel("Predicted"); plt.ylabel("True")
-    plt.tight_layout()
-    plt.savefig("Analytics/confusion_matrix_binary.png")
-    plt.close()
-
-    fpr, tpr, _ = roc_curve(y_binary_true, y_binary_prob)
-    plt.figure()
-    plt.plot(fpr, tpr, label=f"AUC={auc_bin:.3f}")
-    plt.plot([0, 1], [0, 1], 'k--')
-    plt.xlabel("False Positive Rate"); plt.ylabel("True Positive Rate")
-    plt.title("ROC Curve - Normal vs Anomalous")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig("Analytics/roc_curve_binary.png")
-    plt.close()
-
-
 
     # ============================================
-    # CASE 2: 4-CLASS CLASSIFICATION
+    # Classification performance evaluation
     # ============================================
-    print("\n=== Case 2: 4-Class Classification ===")
 
     acc_multi = accuracy_score(y_true, all_preds)
     auc_multi = roc_auc_score(y_true, all_probs, multi_class="ovr") 
@@ -1047,8 +1006,6 @@ def test_model(model_class, model_kwargs, test_loader, device, k=5, test_samples
     metrics_summary = {
         "Ensemble_Accuracy_MajorityVote": acc,
         "Brier_Score_AvgProb": brier,
-        "Binary_Accuracy": acc_bin,
-        "Binary_ROC_AUC": auc_bin,
         "Multi_Accuracy": acc_multi,
         "Multi_ROC_AUC": auc_multi
     }
