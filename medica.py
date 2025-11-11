@@ -787,7 +787,7 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, device, e
 def cross_validate_model(dataset, k, batch_size, model_class, model_kwargs, optimizer_class, optimizer_kwargs, criterion, device, epochs, patience):  
     
     # Handle both DataLoader and raw dataset
-    if isinstance(dataset, torch.utils.data.DataLoader):
+    if isinstance(dataset, DataLoader):
         print("DataLoader detected — using its dataset directly.")
         dataset = dataset.dataset
 
