@@ -1,4 +1,4 @@
-# This is medica_v4 for data preparation, dataset creation and training the model
+# This is medica_v3 for data preparation, dataset creation and training the model
 
 
 import uproot
@@ -170,9 +170,9 @@ class ColliderDataset(Dataset):
         """
         ak_array has branches: track [10,30,7], tower [10,30,8], missinget [10,1,3], output_prob [4]
         """
-        self.track = ak_array["track"]
-        self.tower = ak_array["tower"]
-        self.missinget = ak_array["missinget"]
+        self.track = ak_array["tracks"]
+        self.tower = ak_array["towers"]
+        self.missinget = ak_array["missingets"]
         self.output = ak_array["output_prob"]
 
     def __len__(self):
@@ -210,8 +210,8 @@ def refinement(array, track_min, tower_min):
     Returns:
         refined_array: filtered awkward array
     """
-    n_tracks = ak.num(array["track"])
-    n_towers = ak.num(array["tower"])
+    n_tracks = ak.num(array["tracks"])
+    n_towers = ak.num(array["towers"])
     
     mask = (n_tracks >= track_min) & (n_towers >= tower_min)
     refined_array = array[mask]
@@ -260,8 +260,8 @@ def Dataset_Creator(refined_data, window, event_tower, event_track, seed=None):
     # track features
     n_track_features = None
     for evt in refined_data:
-        if len(evt["track"]) > 0:
-            n_track_features = len(evt["track"][0].fields)
+        if len(evt["tracks"]) > 0:
+            n_track_features = len(evt["tracks"][0].fields)
             break
     if n_track_features is None:
         raise ValueError("No event contains any track; cannot infer track feature dimension")
@@ -269,8 +269,8 @@ def Dataset_Creator(refined_data, window, event_tower, event_track, seed=None):
     # tower features
     n_tower_features = None
     for evt in refined_data:
-        if len(evt["tower"]) > 0:
-            n_tower_features = len(evt["tower"][0].fields)
+        if len(evt["towers"]) > 0:
+            n_tower_features = len(evt["towers"][0].fields)
             break
     if n_tower_features is None:
         raise ValueError("No event contains any tower; cannot infer tower feature dimension")
@@ -278,8 +278,8 @@ def Dataset_Creator(refined_data, window, event_tower, event_track, seed=None):
     # missinget features (take first non-empty missinget record)
     n_missinget_features = None
     for evt in refined_data:
-        if len(evt["missinget"]) > 0:
-            n_missinget_features = len(evt["missinget"][0].fields)
+        if len(evt["missingets"]) > 0:
+            n_missinget_features = len(evt["missingets"][0].fields)
             break
     if n_missinget_features is None:
         raise ValueError("No event contains missinget; cannot infer missinget feature dimension")
@@ -302,10 +302,10 @@ def Dataset_Creator(refined_data, window, event_tower, event_track, seed=None):
             event = refined_data[int(ev_i)]
 
             # ---------- tracks ----------
-            n_tr = len(event["track"])
+            n_tr = len(event["tracks"])
             if n_tr > 0: # Although refinement should ensure this, still added for safety
                 pick_tr = np.random.choice(n_tr, min(event_track, n_tr), replace=False)
-                track_records = event["track"][pick_tr]
+                track_records = event["tracks"][pick_tr]
                 # column_stack fields -> shape (n_selected, n_track_features)
                 track_vals = np.column_stack([ak.to_numpy(track_records[f]) for f in track_records.fields])
                 track_array = np.zeros((event_track, n_track_features), dtype=np.float32)
@@ -315,10 +315,10 @@ def Dataset_Creator(refined_data, window, event_tower, event_track, seed=None):
             set_tracks.append(track_array)
 
             # ---------- towers ----------
-            n_to = len(event["tower"])
+            n_to = len(event["towers"])
             if n_to > 0:
                 pick_to = np.random.choice(n_to, min(event_tower, n_to), replace=False)
-                tower_records = event["tower"][pick_to]
+                tower_records = event["towers"][pick_to]
                 tower_vals = np.column_stack([ak.to_numpy(tower_records[f]) for f in tower_records.fields])
                 tower_array = np.zeros((event_tower, n_tower_features), dtype=np.float32)
                 tower_array[: tower_vals.shape[0], :] = tower_vals.astype(np.float32)
@@ -329,8 +329,8 @@ def Dataset_Creator(refined_data, window, event_tower, event_track, seed=None):
             # ---------- missinget ----------
             missing_vals = np.zeros((1, n_missinget_features), dtype=np.float32)
 
-            if len(event["missinget"]) > 0:
-                missing_records = event["missinget"]
+            if len(event["missingets"]) > 0:
+                missing_records = event["missingets"]
                 vals = np.column_stack([ak.to_numpy(missing_records[f]) for f in missing_records.fields])
                 missing_vals[: vals.shape[0], :] = vals.astype(np.float32)
 
@@ -384,7 +384,7 @@ def Sliding_Window_Dataset_Creator(refined_data, window, event_tower, event_trac
     Parameters
     ----------
     refined_data : list
-        List of events, each with fields "track", "tower", "missinget", "blindfold".
+        List of events, each with fields "tracks", "towers", "missingets", "blindfold".
     window : int
         Number of events per sliding window.
     event_tower : int
@@ -425,17 +425,17 @@ def Sliding_Window_Dataset_Creator(refined_data, window, event_tower, event_trac
 
     # --- determine feature sizes from first non-empty entries ---
     n_track_features = next(
-        (len(evt["track"][0].fields) for evt in refined_data if len(evt["track"]) > 0), None)
+        (len(evt["tracks"][0].fields) for evt in refined_data if len(evt["tracks"]) > 0), None)
     if n_track_features is None:
         raise ValueError("No event contains any track; cannot infer track feature dimension")
 
     n_tower_features = next(
-        (len(evt["tower"][0].fields) for evt in refined_data if len(evt["tower"]) > 0), None)
+        (len(evt["towers"][0].fields) for evt in refined_data if len(evt["towers"]) > 0), None)
     if n_tower_features is None:
         raise ValueError("No event contains any tower; cannot infer tower feature dimension")
 
     n_missinget_features = next(
-        (len(evt["missinget"][0].fields) for evt in refined_data if len(evt["missinget"]) > 0), None)
+        (len(evt["missingets"][0].fields) for evt in refined_data if len(evt["missingets"]) > 0), None)
     if n_missinget_features is None:
         raise ValueError("No event contains missinget; cannot infer missinget feature dimension")
 
@@ -451,10 +451,10 @@ def Sliding_Window_Dataset_Creator(refined_data, window, event_tower, event_trac
             event = refined_data[ev_i]
 
             # --- tracks ---
-            n_tr = len(event["track"])
+            n_tr = len(event["tracks"])
             if n_tr > 0:
                 pick_tr = np.random.choice(n_tr, min(event_track, n_tr), replace=False)
-                track_records = event["track"][pick_tr]
+                track_records = event["tracks"][pick_tr]
                 track_vals = np.column_stack([ak.to_numpy(track_records[f]) for f in track_records.fields])
                 track_array = np.zeros((event_track, n_track_features), dtype=np.float32)
                 track_array[: track_vals.shape[0], :] = track_vals.astype(np.float32)
@@ -463,10 +463,10 @@ def Sliding_Window_Dataset_Creator(refined_data, window, event_tower, event_trac
             set_tracks.append(track_array)
 
             # --- towers ---
-            n_to = len(event["tower"])
+            n_to = len(event["towers"])
             if n_to > 0:
                 pick_to = np.random.choice(n_to, min(event_tower, n_to), replace=False)
-                tower_records = event["tower"][pick_to]
+                tower_records = event["towers"][pick_to]
                 tower_vals = np.column_stack([ak.to_numpy(tower_records[f]) for f in tower_records.fields])
                 tower_array = np.zeros((event_tower, n_tower_features), dtype=np.float32)
                 tower_array[: tower_vals.shape[0], :] = tower_vals.astype(np.float32)
@@ -476,8 +476,8 @@ def Sliding_Window_Dataset_Creator(refined_data, window, event_tower, event_trac
 
             # --- missinget ---
             missing_vals = np.zeros((1, n_missinget_features), dtype=np.float32)
-            if len(event["missinget"]) > 0:
-                missing_records = event["missinget"]
+            if len(event["missingets"]) > 0:
+                missing_records = event["missingets"]
                 vals = np.column_stack([ak.to_numpy(missing_records[f]) for f in missing_records.fields])
                 missing_vals[: vals.shape[0], :] = vals.astype(np.float32)
             set_missinget.append(missing_vals)
