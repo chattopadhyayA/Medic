@@ -170,9 +170,10 @@ class ColliderDataset(Dataset):
         """
         ak_array has branches: track [10,30,7], tower [10,30,8], missinget [10,1,3], output_prob [4]
         """
-        self.track = ak_array["tracks"]
-        self.tower = ak_array["towers"]
-        self.missinget = ak_array["missingets"]
+        # Handle singular/plural naming
+        self.track = ak_array["tracks"] if "tracks" in ak_array.fields else ak_array["track"]
+        self.tower = ak_array["towers"] if "towers" in ak_array.fields else ak_array["tower"]
+        self.missinget = ak_array["missingets"] if "missingets" in ak_array.fields else ak_array["missinget"]
         self.output = ak_array["output_prob"]
 
     def __len__(self):
