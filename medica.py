@@ -20,7 +20,8 @@ from sklearn.metrics import (
     confusion_matrix,
     roc_auc_score,
     roc_curve,
-    accuracy_score
+    accuracy_score,
+    auc
 )
 from sklearn.preprocessing import label_binarize
 
@@ -761,24 +762,44 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, device, e
     df.to_csv(f"Analytics/model_logs_{fold_id}.csv", index=False)  
 
     # Save per-fold plots
-    plt.figure(figsize=(10, 4))
-    plt.subplot(1, 2, 1)
+    plt.figure(figsize=(6, 4))
     plt.plot(df["epoch"], df["train_acc"], label="Train Acc")
     plt.plot(df["epoch"], df["val_acc"], label="Val Acc")
-    plt.axvline(x=epoch + 1 - patience_counter, color='red', linestyle='--', label="Early Stop")  
-    plt.xlabel("Epoch"); plt.ylabel("Accuracy"); plt.legend()
-    plt.title(f"Fold {fold_id} Accuracy")
+    plt.axvline(x=epoch + 1 - patience_counter, color='red', linestyle='--', label="Early Stop")
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy")
+    plt.legend()
+    plt.title(f"Model {fold_id} Accuracy")
+    plt.tight_layout()
+    plt.savefig(f"Analytics/training_fold_{fold_id}_accuracy.png")  
+    plt.close()
 
-    plt.subplot(1, 2, 2)
+
+    plt.figure(figsize=(6, 4))
     plt.plot(df["epoch"], df["train_brier"], label="Train Brier")
     plt.plot(df["epoch"], df["val_brier"], label="Val Brier")
-    plt.axvline(x=epoch + 1 - patience_counter, color='red', linestyle='--', label="Early Stop") 
-    plt.xlabel("Epoch"); plt.ylabel("Brier Score"); plt.legend()
-    plt.title(f"Fold {fold_id} Brier")
-
+    plt.axvline(x=epoch + 1 - patience_counter, color='red', linestyle='--', label="Early Stop")
+    plt.xlabel("Epoch")
+    plt.ylabel("Brier Score")
+    plt.legend()
+    plt.title(f"Model {fold_id} Brier Score")
     plt.tight_layout()
-    plt.savefig(f"Analytics/training_fold_{fold_id}.png")  
+    plt.savefig(f"Analytics/training_fold_{fold_id}_brier.png") 
     plt.close()
+
+
+    plt.figure(figsize=(6, 4))
+    plt.plot(df["epoch"], df["train_loss"], label="Train Loss")
+    plt.plot(df["epoch"], df["val_loss"], label="Val Loss")
+    plt.axvline(x=epoch + 1 - patience_counter, color='red', linestyle='--', label="Early Stop")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.title(f"Model {fold_id} Loss")
+    plt.tight_layout()
+    plt.savefig(f"Analytics/training_fold_{fold_id}_loss.png")
+    plt.close()
+
 
 
     return df
@@ -846,6 +867,15 @@ def cross_validate_model(dataset, k, batch_size, model_class, model_kwargs, opti
 
     plt.figure(figsize=(12, 5))
     for i, df in enumerate(all_logs, start=1):
+        plt.plot(df["epoch"], df["val_loss"], label=f"Model {i}")
+    plt.xlabel("Epoch"); plt.ylabel("Validation loss")
+    plt.title("Validation loss for each model")
+    plt.legend()
+    plt.savefig("Analytics/validation_loss_all_folds.png")  
+    plt.close()
+
+    plt.figure(figsize=(12, 5))
+    for i, df in enumerate(all_logs, start=1):
         plt.plot(df["epoch"], df["train_acc"], label=f"Model {i}")
     plt.xlabel("Epoch"); plt.ylabel("Training Accuracy")
     plt.title("Training Accuracy for each model")
@@ -862,8 +892,48 @@ def cross_validate_model(dataset, k, batch_size, model_class, model_kwargs, opti
     plt.savefig("Analytics/training_brier_all_folds.png")  
     plt.close()
 
+    plt.figure(figsize=(12, 5))
+    for i, df in enumerate(all_logs, start=1):
+        plt.plot(df["epoch"], df["train_loss"], label=f"Model {i}")
+    plt.xlabel("Epoch"); plt.ylabel("Training loss")
+    plt.title("Training loss for each model")
+    plt.legend()
+    plt.savefig("Analytics/training_loss_all_folds.png")  
+    plt.close()
 
+def soft_confusion_matrix(y_true, y_probs, classes=None, normalize=True):
+    """
+    Compute a soft confusion matrix for probabilistic (soft) labels for specified classes.
 
+    Parameters
+    ----------
+    y_true : np.ndarray of shape [n_samples, n_classes], true probabilities
+    y_probs : np.ndarray of shape [n_samples, n_classes], predicted probabilities
+    classes : list of int, optional
+        Subset of class indices to compute the confusion matrix for. If None, use all classes.
+    normalize : bool, optional (default=True)
+        If True, rows are normalized to sum to 1.
+
+    Returns
+    -------
+    soft_CM : np.ndarray of shape [len(classes), len(classes)]
+        Soft confusion matrix (joint true-predicted mass) for selected classes.
+    """
+    if classes is None:
+        classes = np.arange(y_true.shape[1])
+    
+    # Select only the columns corresponding to the specified classes
+    y_true_sub = y_true[:, classes]   # [N, C_sub]
+    y_probs_sub = y_probs[:, classes] # [N, C_sub]
+
+    # Compute joint mass
+    soft_CM = np.dot(y_true_sub.T, y_probs_sub)  # [C_sub, C_sub]
+
+    if normalize:
+        row_sums = soft_CM.sum(axis=1, keepdims=True)
+        soft_CM = np.divide(soft_CM, row_sums, out=np.zeros_like(soft_CM), where=row_sums != 0)
+
+    return soft_CM
 
 
 def test_model(model_class, model_kwargs, test_loader, device, k=5, test_samples = 10000):
@@ -990,11 +1060,24 @@ def test_model(model_class, model_kwargs, test_loader, device, k=5, test_samples
     sns.heatmap(cm_multi, annot=True, fmt='d', cmap='Blues',
                 xticklabels=["Normal", "Barrel", "Endcap", "Forward"],
                 yticklabels=["Normal", "Barrel", "Endcap", "Forward"])
-    plt.title(f"Confusion Matrix (4-Class)\nAcc={acc_multi:.3f}, AUC={auc_multi:.3f}")
+    plt.title(f"Confusion Matrix (4-Class)\nAcc={acc_multi:.3f}")
     plt.xlabel("Predicted"); plt.ylabel("True")
     plt.tight_layout()
     plt.savefig("Analytics/confusion_matrix_multiclass.png")
     plt.close()
+
+    cm_multi_soft = soft_confusion_matrix(all_targets_np, all_probs, classes=[0,1,2,3])
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(cm_multi_soft, annot=True, fmt='.1f', cmap='Blues',
+                xticklabels=["Normal", "Barrel", "Endcap", "Forward"],
+                yticklabels=["Normal", "Barrel", "Endcap", "Forward"])
+    plt.title(f"Soft Confusion Matrix (4-Class)")
+    plt.xlabel("Predicted"); plt.ylabel("True")
+    plt.tight_layout()
+    plt.savefig("Analytics/soft_confusion_matrix_multiclass.png")
+    plt.close()
+
+    
 
     # ROC for each class
     plt.figure(figsize=(7, 5))
@@ -1009,12 +1092,95 @@ def test_model(model_class, model_kwargs, test_loader, device, k=5, test_samples
     plt.savefig("Analytics/roc_curve_multiclass.png")
     plt.close()
 
+    # ============================================
+    # Classification performance evaluation for Binary case
+    # ============================================
+
+    # --- Binary conversion (Normal=0, Anomalous=1) ---
+    y_binary_true = np.where(np.argmax(all_targets_np, axis=1) == 0, 0, 1)  # class 0=Normal, others=Anomalous
+    y_binary_pred = np.where(np.argmax(all_probs, axis=1) == 0, 0, 1)
+
+    # --- Balance data ---
+    normal_indices = np.where(y_binary_true == 0)[0] 
+    anomalous_indices = np.where(y_binary_true == 1)[0] 
+    n_samples_binary = min(test_samples, len(normal_indices), len(anomalous_indices)) 
+    print(f"Using {n_samples_binary} samples per class for balanced evaluation of binary case.") 
+
+    selected_indices = np.concatenate([
+        np.random.choice(normal_indices, n_samples_binary, replace=False),
+        np.random.choice(anomalous_indices, n_samples_binary, replace=False)
+        ]) 
+
+    y_binary_true_bal = y_binary_true[selected_indices] 
+    y_binary_pred_bal = y_binary_pred[selected_indices]
+    probs_binary_bal = all_probs[selected_indices]  
+
+    p0_pred = all_probs[:,0]  # predicted probability for Normal
+    probs_binary_bal = np.zeros((len(selected_indices), 2))  # shape [N, 2]
+    probs_binary_bal[:,0] = p0_pred[selected_indices]       # Normal
+    probs_binary_bal[:,1] = 1 - p0_pred[selected_indices]   # Anomalous
+
+    p0_true = all_targets_np[:,0]  # true probability for Normal
+    y_true_probs_bal = np.zeros((len(selected_indices), 2))
+    y_true_probs_bal[:,0] = p0_true[selected_indices]       # Normal
+    y_true_probs_bal[:,1] = 1 - p0_true[selected_indices] 
+
+    # --- Soft confusion matrix  ---
+    cm_binary = confusion_matrix(y_binary_true_bal, y_binary_pred_bal, labels=[0,1])
+    cm_binary_soft = soft_confusion_matrix(y_true_probs_bal, probs_binary_bal, classes=[0,1])
+
+    acc_binary = accuracy_score(y_binary_true_bal, y_binary_pred_bal)
+    roc_auc_binary = roc_auc_score(y_binary_true_bal, 1 - probs_binary_bal[:, 0]) 
+
+    print(f"Binary Accuracy: {acc_binary:.4f}, ROC-AUC: {roc_auc_binary:.4f}")
+
+    # --- Plot confusion matrix  ---
+    plt.figure(figsize=(5, 4))
+    sns.heatmap(cm_binary, annot=True, fmt='d', cmap='Greens',
+                xticklabels=["Normal", "Anomalous"],
+                yticklabels=["Normal", "Anomalous"])
+    plt.title(f"Confusion Matrix binary\nAcc={acc_binary:.3f}")
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    plt.tight_layout()
+    plt.savefig("Analytics/confusion_matrix_binary.png")
+    plt.close()
+
+
+    # --- Plot soft confusion matrix  ---
+    plt.figure(figsize=(5, 4))
+    sns.heatmap(cm_binary_soft, annot=True, fmt='.1f', cmap='Greens',
+                xticklabels=["Normal", "Anomalous"],
+                yticklabels=["Normal", "Anomalous"])
+    plt.title(f"Soft Confusion Matrix binary\nAcc={acc_binary:.3f}")
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    plt.tight_layout()
+    plt.savefig("Analytics/soft_confusion_matrix_binary.png")
+    plt.close()
+
+    fpr, tpr, _ = roc_curve(y_binary_true_bal, 1 - probs_binary_bal[:, 0])
+
+    plt.figure(figsize=(5, 4))
+    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {roc_auc_binary:.3f})')
+    plt.plot([0, 1], [0, 1], color='navy', lw=1, linestyle='--')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC: Normal vs Anomalous')
+    plt.legend(loc="lower right")
+    plt.tight_layout()
+    plt.savefig("Analytics/roc_binary.png")
+    plt.close()
+
+
     # Save metrics summary
     metrics_summary = {
         "Ensemble_Accuracy_MajorityVote": acc,
         "Brier_Score_AvgProb": brier,
         "Multi_Accuracy": acc_multi,
-        "Multi_ROC_AUC": auc_multi
+        "Multi_ROC_AUC": auc_multi,
+        "Binary_Accuracy": acc_binary,
+        "Binary_ROC_AUC": roc_auc_binary
     }
     pd.DataFrame([metrics_summary]).to_csv("Analytics/ensemble_metrics.csv", index=False)
 
