@@ -722,9 +722,10 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, device, e
 
 
                 true_cls = y.argmax(dim=1)
-                sample_weights = class_weights[true_cls]
+                #sample_weights = class_weights[true_cls] # Class weights are not used for validation loss
                 loss_per_sample = criterion(log_probs, y)
-                loss = (loss_per_sample * sample_weights).mean()
+                #loss = (loss_per_sample * sample_weights).mean()
+                loss = (loss_per_sample).mean()
                 val_loss += loss.item()
                 pred_cls = probs.argmax(dim=1)
 
@@ -936,7 +937,7 @@ def soft_confusion_matrix(y_true, y_probs, classes=None, normalize=True):
     return soft_CM
 
 
-def test_model(model_class, model_kwargs, test_loader, device, k=5, test_samples = 10000):
+def test_model(model_class, model_kwargs, test_loader, device, k=5, test_samples = 3000):
     print("\nRunning a quick analysis of the test data...")
 
     all_y = []
