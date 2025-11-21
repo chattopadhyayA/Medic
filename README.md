@@ -1,5 +1,5 @@
 # MEDIC
-This is the code repository for MEDIC (**M**onitoring for **E**vent **D**ata **I**ntegrity and **C**onsistency) network, based on the paper titled **[MEDIC: a network for monitoring data quality in collider experiments](https://arxiv.com)**.
+This is the code repository for MEDIC (**M**onitoring for **E**vent **D**ata **I**ntegrity and **C**onsistency) network, based on the paper titled **[MEDIC: a network for monitoring data quality in collider experiments](https://arxiv.com)**. The main data for training MEDIC is generated through **[Delphes-BlindCalorimeter](https://github.com/chattopadhyayA/Delphes-BlindCalorimeter)**, a fork of **[Delphes](https://delphes.github.io)** that introduces a blind calorimeter feature, allowing users to define insensitive bins in the calorimeter.
 
 
 # File overview
