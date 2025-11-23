@@ -25,7 +25,7 @@ probabilities.
 
 **delphes_cards**: This folder contains all the parameter cards used to run Delphes for simulating different glitches
 
-**Images**: A foldes to contain images to display in the main page.
+**Images**: A folder containing images to display in the main page.
 
 
 ## License and Citation
