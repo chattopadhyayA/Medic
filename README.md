@@ -7,7 +7,7 @@ This is the code repository for MEDIC (**M**onitoring for **E**vent **D**ata **I
 MEDIC treats the three branches (Tracks, Towers, and MET) in three separate channels that encode detector inputs through linear projections, transformer encoders and attention pooling. This is followed by a series of convolutional layers, then a global average pooling and a fully connected classifier to return
 probabilities.
 
-![alt text](https://github.com/chattopadhyayA/Medic/blob/main/Images/MEDIC_CNN.pdf "Title")
+![alt text](https://github.com/chattopadhyayA/Medic/blob/main/Images/MEDIC_CNN.png "Title")
 
 
 # File overview
