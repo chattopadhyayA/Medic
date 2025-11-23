@@ -8,7 +8,7 @@ MEDIC treats the three branches (Tracks, Towers, and MET) in three separate chan
 probabilities.
 
 <p align="center">
-  <img width="400" src="https://github.com/chattopadhyayA/Medic/blob/main/Images/MEDIC_CNN.png" />
+  <img width="500" src="https://github.com/chattopadhyayA/Medic/blob/main/Images/MEDIC_CNN.png" />
 </p>
 
 
