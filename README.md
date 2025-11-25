@@ -37,5 +37,13 @@ This work is licensed under a [Creative Commons Attribution 4.0 International](h
 We encourage use of these codes \& data in derivative works. If you use the material provided here, please cite the paper using the reference:
 
 ```
-@article{to be updated soon}
+@article{MEDIC,
+      title={MEDIC: a network for monitoring data quality in collider experiments}, 
+      author={Juvenal Bassa and Arghya Chattopadhyay and Sudhir Malik and Mario Escabi Rivera},
+      year={2025},
+      eprint={2511.18172},
+      archivePrefix={arXiv},
+      primaryClass={hep-ex},
+      url={https://arxiv.org/abs/2511.18172}, 
+}
 ```
